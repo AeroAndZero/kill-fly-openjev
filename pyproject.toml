@@ -1,0 +1,58 @@
+[project]
+name = "openjev3"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Ayush Thakur", email = "ayushthakur667@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "decider-ai>=1.5.0",
+    "fastapi>=0.141.1",
+    "numpy>=1.26.4",
+    "pillow>=12.3.0",
+    "python-multipart>=0.0.32",
+    "torch",
+    "torchvision",
+    # Windows only. On Linux, the torch wheel already pulls in the official triton package.
+    "triton-windows>=3.8.0.post28; sys_platform == 'win32'",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+openjev3 = "openjev3:main"
+serve = "openjev3.serve:main"
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+# Only resolve for the two machines this runs on: your Windows PC and the Linux RunPod pod.
+environments = [
+    "sys_platform == 'win32'",
+    "sys_platform == 'linux'",
+]
+
+[tool.uv.sources]
+# Windows (local RTX 3060): CUDA 13.0 wheels, as before.
+# Linux (RunPod, runpod/pytorch:...-cu1281-...): CUDA 12.8 wheels, which run on any host driver that image runs on.
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
