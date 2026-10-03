@@ -1,0 +1,7 @@
+> ssh -p 56119 root@183.89.209.74 -L 8080:localhost:8080
+
+curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env
+git clone https://github.com/AeroAndZero/kill-fly-openjev.git && cd kill-fly-openjev
+uv sync --frozen
+uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name())"
+uv run serve

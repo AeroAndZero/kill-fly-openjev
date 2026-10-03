@@ -1,11 +1,12 @@
-# Claude optimized from __init__.py >> very little performance boost
+import asyncio
 import io
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import torch
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, WebSocket
 from PIL import Image, UnidentifiedImageError
 
 from decider.engine import patch_conv
@@ -110,6 +111,15 @@ class ImageDecider:
 app = FastAPI()
 imageDecider = ImageDecider()
 
+# All GPU work goes through ONE dedicated thread:
+#  - the async event loop never blocks on inference, so other sockets keep receiving/decoding meanwhile
+#  - requests from multiple connections are serialized on the single model (no concurrent forwards)
+GPU_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gpu")
+
+
+class BadImage(Exception):
+    pass
+
 
 def to_pil(data: bytes) -> Image.Image:
     try:
@@ -118,38 +128,72 @@ def to_pil(data: bytes) -> Image.Image:
         img.draft("RGB", (IMAGE_SIZE_X, IMAGE_SIZE_Y))
         img.load()  # full decode now so bad files fail here, not later
     except UnidentifiedImageError:
-        raise HTTPException(400, "Not a recognised image format")
+        raise BadImage("Not a recognised image format")
     except (OSError, Image.DecompressionBombError) as e:
-        raise HTTPException(400, f"Could not decode image: {e}")
+        raise BadImage(f"Could not decode image: {e}")
 
     img = img.convert("RGB")
     return img.resize((IMAGE_SIZE_X, IMAGE_SIZE_Y), Image.Resampling.BICUBIC, reducing_gap=2.0)
 
 
-# --- GET
+# --- GET (health check stays HTTP)
 @app.get("/")
 def hello():
     return {"status": "server is live"}
 
 
-# --- POST
-@app.post("/image")
-def process_image(file: UploadFile = File(...)):
-    data = file.file.read(MAX_BYTES + 1)
-    if len(data) > MAX_BYTES:
-        raise HTTPException(413, "Image is too big")
-    img = to_pil(data)
+# --- WebSocket (replaces POST /image)
+# Protocol, per connection, strictly request -> response in order:
+#   client sends: one BINARY frame = raw image file bytes (jpg/png/...)
+#   server sends: one JSON text frame = same result dict as the old POST /image,
+#                 or {"error": "...", "code": 400|413|500} on failure (connection stays open)
+#   client may send the TEXT frame "ping" -> server replies {"type": "pong"}
+@app.websocket("/ws/image")
+async def image_socket(ws: WebSocket):
+    await ws.accept()
+    loop = asyncio.get_running_loop()
 
-    start_time = time.perf_counter()
-    result = imageDecider.infer(img)   # .cpu() inside syncs the GPU, so this timing is real
-    end_time = time.perf_counter()
+    while True:
+        msg = await ws.receive()
+        if msg["type"] == "websocket.disconnect":
+            break
 
-    print(f"Took: {(end_time - start_time) * 1000:.1f} ms")
-    return result
+        data = msg.get("bytes")
+        if data is None:
+            if msg.get("text") == "ping":
+                await ws.send_json({"type": "pong"})
+            else:
+                await ws.send_json({"error": "Send the image as a binary frame", "code": 400})
+            continue
+
+        # Backstop: uvicorn.run(ws_max_size=...) below already rejects oversized frames,
+        # but that setting doesn't apply if the app is launched via the uvicorn CLI.
+        if len(data) > MAX_BYTES:
+            await ws.send_json({"error": "Image is too big", "code": 413})
+            continue
+
+        # Decode on the default thread pool so it overlaps with GPU work for other connections.
+        try:
+            img = await asyncio.to_thread(to_pil, data)
+        except BadImage as e:
+            await ws.send_json({"error": str(e), "code": 400})
+            continue
+
+        start_time = time.perf_counter()
+        try:
+            result = await loop.run_in_executor(GPU_POOL, imageDecider.infer, img)
+        except Exception as e:
+            await ws.send_json({"error": f"Inference failed: {e}", "code": 500})
+            continue
+        end_time = time.perf_counter()  # includes queue wait if other connections are busy
+
+        print(f"Took: {(end_time - start_time) * 1000:.1f} ms")
+        await ws.send_json(result)
 
 
 def main() -> None:
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Needs a websocket backend: pip install "uvicorn[standard]"  (or: pip install websockets)
+    uvicorn.run(app, host="0.0.0.0", port=8000, ws_max_size=MAX_BYTES)
 
 
 if __name__ == "__main__":
