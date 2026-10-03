@@ -17,7 +17,7 @@ dependencies = [
     "torchvision",
     # Windows only. On Linux, the torch wheel already pulls in the official triton package.
     "triton-windows>=3.8.0.post28; sys_platform == 'win32'",
-    "uvicorn>=0.54.0",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]
